@@ -83,3 +83,27 @@ def test_write_deck_exports_dedupes_requested_formats(tmp_path: Path) -> None:
     assert len(written) == 2
     assert sum(1 for path in written if path.name.endswith(".moxfield.txt")) == 1
     assert sum(1 for path in written if path.name.endswith(".archidekt.txt")) == 1
+
+
+def test_write_deck_exports_avoids_same_run_filename_collisions(tmp_path: Path) -> None:
+    deck_one = _deck()
+    deck_two = _deck()
+
+    written = write_deck_exports([deck_one, deck_two], tmp_path, formats=["moxfield"])
+
+    assert len(written) == 2
+    assert written[0].name == "atraxa_praetors_voice.moxfield.txt"
+    assert written[1].name == "atraxa_praetors_voice-2.moxfield.txt"
+    assert all(path.exists() for path in written)
+
+
+def test_write_deck_exports_avoids_overwriting_existing_file(tmp_path: Path) -> None:
+    deck = _deck()
+    existing = tmp_path / "atraxa_praetors_voice.moxfield.txt"
+    existing.write_text("existing-content\n", encoding="utf-8")
+
+    written = write_deck_exports([deck], tmp_path, formats=["moxfield"])
+
+    assert len(written) == 1
+    assert written[0].name == "atraxa_praetors_voice-2.moxfield.txt"
+    assert existing.read_text(encoding="utf-8") == "existing-content\n"

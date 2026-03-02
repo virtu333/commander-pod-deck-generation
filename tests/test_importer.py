@@ -49,6 +49,42 @@ def test_parse_text_format(tmp_path: Path) -> None:
     assert cards["Command Tower"].scryfall_id is None
 
 
+def test_parse_text_format_supports_x_quantity_variants(tmp_path: Path) -> None:
+    fixture = tmp_path / "sample_collection_x.txt"
+    fixture.write_text(
+        "\n".join(
+            [
+                "1x Sol Ring",
+                "2 x Command Tower",
+                "3× Arcane Signet",
+                "Arcane Signet",
+                "0x Plains",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    entries = import_text(fixture)
+    cards = _by_name(entries)
+
+    assert len(entries) == 3
+    assert cards["Sol Ring"].quantity == 1
+    assert cards["Command Tower"].quantity == 2
+    assert cards["Arcane Signet"].quantity == 4
+
+
+def test_parse_text_format_x_prefix_does_not_strip_card_name_leading_x(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "sample_collection_xenagos.txt"
+    fixture.write_text("2 Xenagos, God of Revels\n", encoding="utf-8")
+
+    entries = import_text(fixture)
+
+    assert len(entries) == 1
+    assert entries[0].quantity == 2
+    assert entries[0].name == "Xenagos, God of Revels"
+
+
 def test_empty_and_malformed_rows_are_skipped(tmp_path: Path) -> None:
     csv_file = tmp_path / "malformed.csv"
     csv_file.write_text(

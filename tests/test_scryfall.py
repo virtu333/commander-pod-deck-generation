@@ -344,6 +344,24 @@ def test_load_bulk_data_rejects_non_array_json(tmp_path: Path) -> None:
         client.load_bulk_data(bulk_file)
 
 
+def test_load_bulk_data_non_array_path_does_not_call_json_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(json.dumps({"id": "x"}), encoding="utf-8")
+
+    def fail_json_load(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("json.load should not be called for non-array validation")
+
+    monkeypatch.setattr("src.utils.scryfall.json.load", fail_json_load)
+
+    with pytest.raises(ValueError, match="must be an array"):
+        client.load_bulk_data(bulk_file)
+
+
 def test_get_card_by_name_uses_set_then_collector_then_stable_fallback(tmp_path: Path) -> None:
     cache = CardCache(str(tmp_path / "cache.db"))
     client = ScryfallClient(cache)
@@ -399,3 +417,65 @@ def test_get_card_by_name_treats_corrupt_oracle_row_as_miss(tmp_path: Path) -> N
 
     card = client.get_card_by_name("Sol Ring")
     assert card is None
+
+
+def test_get_card_cached_treats_malformed_cached_payload_as_miss(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    cache.put_card(
+        "bad-card",
+        {
+            **_card_payload("bad-card", "Bad Card"),
+            "cmc": "not-a-number",
+            "legalities": "not-a-dict",
+        },
+    )
+
+    assert client.get_card_cached("bad-card") is None
+
+
+def test_get_card_by_name_skips_malformed_candidate_and_uses_next(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(
+        json.dumps(
+            [
+                {**_card_payload("card-a", "Sol Ring", set_code="a"), "cmc": "bad-cmc"},
+                _card_payload("card-b", "Sol Ring", set_code="b"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.load_bulk_data(bulk_file)
+
+    card = client.get_card_by_name("Sol Ring")
+    assert card is not None
+    assert card.scryfall_id == "card-b"
+
+
+def test_load_bulk_data_rejects_non_object_item_with_index(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(json.dumps([_card_payload("card-1", "Sol Ring"), "bad-item"]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="index 1"):
+        client.load_bulk_data(bulk_file)
+
+
+def test_load_bulk_data_streams_array_without_json_load_on_valid_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(json.dumps([_card_payload("card-1", "Sol Ring")]), encoding="utf-8")
+
+    def fail_json_load(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("json.load should not be called for valid Oracle arrays")
+
+    monkeypatch.setattr("src.utils.scryfall.json.load", fail_json_load)
+
+    assert client.load_bulk_data(bulk_file) == 1

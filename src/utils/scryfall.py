@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,84 @@ from src.collection.models import Card
 from src.utils.cache import CardCache
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _JsonCharReader:
+    """Minimal buffered char reader for streaming large JSON payloads."""
+
+    def __init__(self, path: Path, chunk_size: int = 64 * 1024) -> None:
+        self.path = path
+        self.chunk_size = chunk_size
+        self._handle = path.open("r", encoding="utf-8")
+        self._buffer = ""
+        self._position = 0
+        self._eof = False
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def peek(self) -> str | None:
+        while self._position >= len(self._buffer):
+            if self._eof:
+                return None
+            chunk = self._handle.read(self.chunk_size)
+            if chunk == "":
+                self._eof = True
+                return None
+            self._buffer = chunk
+            self._position = 0
+        return self._buffer[self._position]
+
+    def consume(self) -> str | None:
+        char = self.peek()
+        if char is None:
+            return None
+        self._position += 1
+        return char
+
+    def skip_whitespace(self) -> str | None:
+        while True:
+            char = self.peek()
+            if char is None or not char.isspace():
+                return char
+            self._position += 1
+
+    def read_json_object(self) -> str:
+        if self.peek() != "{":
+            raise ValueError("Expected '{' while parsing Oracle bulk card object.")
+
+        depth = 0
+        in_string = False
+        escaping = False
+        chars: list[str] = []
+
+        while True:
+            char = self.consume()
+            if char is None:
+                raise ValueError(
+                    f"Unexpected end of file while reading Oracle bulk data: {self.path}"
+                )
+            chars.append(char)
+
+            if in_string:
+                if escaping:
+                    escaping = False
+                elif char == "\\":
+                    escaping = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+                continue
+            if char == "}":
+                depth -= 1
+                if depth == 0:
+                    return "".join(chars)
 
 
 class ScryfallError(Exception):
@@ -61,7 +140,7 @@ class ScryfallClient:
         cached = self.cache.get_card(scryfall_id)
         if cached is None:
             return None
-        return self._parse_card(cached)
+        return self._parse_local_card(cached)
 
     def load_bulk_data(self, filepath: str | Path) -> int:
         """Load Scryfall Oracle bulk JSON from disk into local cache."""
@@ -73,17 +152,9 @@ class ScryfallClient:
             raise ValueError(f"Oracle bulk data path is not a file: {path}")
 
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}") from exc
+            return self.cache.replace_oracle_cards(self._iter_bulk_card_objects(path))
         except OSError as exc:
             raise ValueError(f"Failed to read Oracle bulk data file: {path}: {exc}") from exc
-
-        if not isinstance(payload, list):
-            raise ValueError("Oracle bulk data JSON must be an array of card objects.")
-
-        return self.cache.replace_oracle_cards(payload)
 
     def get_card_by_name(
         self,
@@ -95,18 +166,16 @@ class ScryfallClient:
         """Resolve a card by name from locally loaded Oracle bulk data only."""
 
         candidates = self.cache.get_oracle_cards_by_name(name)
-        candidate = self._best_oracle_candidate(
+        ordered_candidates = self._ordered_oracle_candidates(
             candidates,
             set_code=set_code,
             collector_number=collector_number,
         )
-        if candidate is None:
-            return None
-
-        scryfall_id = str(candidate.get("id", "")).strip()
-        if not scryfall_id:
-            return None
-        return self._parse_card(candidate)
+        for candidate in ordered_candidates:
+            parsed = self._parse_local_card(candidate)
+            if parsed is not None:
+                return parsed
+        return None
 
     def search(self, query: str) -> list[Card]:
         """Run a Scryfall search query, handling pagination."""
@@ -155,7 +224,11 @@ class ScryfallClient:
                 if cached_raw is None:
                     missing_ids.append(card_id)
                     continue
-                resolved_by_index[index] = self._parse_card(cached_raw)
+                parsed = self._parse_local_card(cached_raw)
+                if parsed is None:
+                    missing_ids.append(card_id)
+                    continue
+                resolved_by_index[index] = parsed
 
             fetched_missing: dict[str, Card | None] = {}
             for card_id in dict.fromkeys(missing_ids):
@@ -173,14 +246,14 @@ class ScryfallClient:
         return cards
 
     @staticmethod
-    def _best_oracle_candidate(
+    def _ordered_oracle_candidates(
         candidates: list[dict[str, Any]],
         *,
         set_code: str | None,
         collector_number: str | None,
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
         if not candidates:
-            return None
+            return []
 
         filtered = [
             card
@@ -188,7 +261,7 @@ class ScryfallClient:
             if isinstance(card, dict) and str(card.get("id", "")).strip()
         ]
         if not filtered:
-            return None
+            return []
 
         if set_code:
             target_set = set_code.strip().casefold()
@@ -213,8 +286,7 @@ class ScryfallClient:
                 if collector_matches:
                     filtered = collector_matches
 
-        ordered = sorted(filtered, key=ScryfallClient._oracle_candidate_sort_key)
-        return ordered[0] if ordered else None
+        return sorted(filtered, key=ScryfallClient._oracle_candidate_sort_key)
 
     @staticmethod
     def _oracle_candidate_sort_key(card: dict[str, Any]) -> tuple[str, str, str]:
@@ -223,6 +295,112 @@ class ScryfallClient:
             str(card.get("collector_number", "")).strip().casefold(),
             str(card.get("id", "")).strip(),
         )
+
+    @staticmethod
+    def _iter_bulk_card_objects(path: Path) -> Iterator[dict[str, Any]]:
+        reader = _JsonCharReader(path)
+        item_index = 0
+        try:
+            first = reader.skip_whitespace()
+            if first != "[":
+                ScryfallClient._raise_invalid_json_or_non_array(
+                    path,
+                    first_char=first,
+                    reader=reader,
+                )
+            reader.consume()
+
+            while True:
+                current = reader.skip_whitespace()
+                if current is None:
+                    raise ValueError(
+                        f"Unexpected end of file while parsing Oracle bulk data: {path}"
+                    )
+                if current == "]":
+                    reader.consume()
+                    trailing = reader.skip_whitespace()
+                    if trailing is not None:
+                        raise ValueError(
+                            "Oracle bulk data JSON must contain a single top-level array."
+                        )
+                    return
+                if current != "{":
+                    raise ValueError(
+                        f"Oracle bulk data array item at index {item_index} must be an object."
+                    )
+
+                object_text = reader.read_json_object()
+                try:
+                    card = json.loads(object_text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "Invalid JSON object in Oracle bulk data "
+                        f"at index {item_index}: {exc.msg}"
+                    ) from exc
+
+                if not isinstance(card, dict):
+                    raise ValueError(
+                        f"Oracle bulk data array item at index {item_index} must be an object."
+                    )
+                yield card
+                item_index += 1
+
+                separator = reader.skip_whitespace()
+                if separator == ",":
+                    reader.consume()
+                    continue
+                if separator == "]":
+                    reader.consume()
+                    trailing = reader.skip_whitespace()
+                    if trailing is not None:
+                        raise ValueError(
+                            "Oracle bulk data JSON must contain a single top-level array."
+                        )
+                    return
+                if separator is None:
+                    raise ValueError(
+                        "Unexpected end of file after Oracle bulk data item "
+                        f"at index {item_index - 1}."
+                    )
+                raise ValueError(
+                    "Oracle bulk data array expected ',' or ']' after item "
+                    f"at index {item_index - 1}."
+                )
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}") from exc
+        finally:
+            reader.close()
+
+    def _parse_local_card(self, data: dict[str, Any]) -> Card | None:
+        try:
+            return self._parse_card(data)
+        except (AttributeError, TypeError, ValueError) as exc:
+            LOGGER.warning("Ignoring malformed local card payload: %s", exc)
+            return None
+
+    @staticmethod
+    def _raise_invalid_json_or_non_array(
+        path: Path,
+        *,
+        first_char: str | None,
+        reader: _JsonCharReader,
+    ) -> None:
+        if first_char is None:
+            raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}")
+
+        if first_char == "{":
+            reader.consume()
+            next_non_ws = reader.skip_whitespace()
+            if next_non_ws not in {'"', "}"}:
+                raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}")
+            raise ValueError("Oracle bulk data JSON must be an array of card objects.")
+
+        if first_char == '"' or first_char == "-" or first_char.isdigit():
+            raise ValueError("Oracle bulk data JSON must be an array of card objects.")
+        if first_char in {"t", "f", "n"}:
+            raise ValueError("Oracle bulk data JSON must be an array of card objects.")
+
+        raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}")
 
     def _request(
         self,

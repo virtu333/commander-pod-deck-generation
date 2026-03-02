@@ -105,6 +105,7 @@ def write_deck_exports(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     written_paths: list[Path] = []
+    reserved_paths: set[Path] = set()
     for deck in decks:
         base_name = _slug(deck.commander.name)
         for fmt in unique_formats:
@@ -118,7 +119,12 @@ def write_deck_exports(
                 content = format_manabox(deck)
                 extension = ".manabox.csv"
 
-            path = output_dir / f"{base_name}{extension}"
+            path = _allocate_unique_path(
+                output_dir=output_dir,
+                base_name=base_name,
+                extension=extension,
+                reserved=reserved_paths,
+            )
             path.write_text(content, encoding="utf-8")
             written_paths.append(path)
     return written_paths
@@ -141,3 +147,19 @@ def _aggregate_cards(cards: list[Card]) -> list[tuple[int, Card]]:
 def _slug(text: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip()).strip("_")
     return cleaned.casefold() or "deck"
+
+
+def _allocate_unique_path(
+    *,
+    output_dir: Path,
+    base_name: str,
+    extension: str,
+    reserved: set[Path],
+) -> Path:
+    candidate = output_dir / f"{base_name}{extension}"
+    suffix = 2
+    while candidate in reserved or candidate.exists():
+        candidate = output_dir / f"{base_name}-{suffix}{extension}"
+        suffix += 1
+    reserved.add(candidate)
+    return candidate

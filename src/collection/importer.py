@@ -21,7 +21,10 @@ _COLUMN_ALIASES = {
     "foil": {"foil", "is foil", "foiled"},
 }
 
-_TEXT_ENTRY_RE = re.compile(r"^\s*(\d+)\s+(.+?)\s*$")
+_TEXT_ENTRY_RE = re.compile(
+    "^\\s*(\\d+)(?:\\s+[x\\u00d7]\\s+|[x\\u00d7]\\s+|\\s+)(.+?)\\s*$",
+    re.IGNORECASE,
+)
 
 
 def import_csv(filepath: Path) -> list[RawCardEntry]:
@@ -173,3 +176,4 @@ def _clean(value: str | None) -> str:
     if value is None:
         return ""
     return value.strip()
+
