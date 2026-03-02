@@ -86,7 +86,7 @@ class CommanderSuggester:
             card = owned_card.card
             if not _is_legal_commander(card):
                 continue
-            deduped[self._card_identity_key(card)] = card
+            deduped[self._commander_key(card)] = card
         return sorted(deduped.values(), key=lambda card: card.name.casefold())
 
     def suggest(
@@ -100,20 +100,21 @@ class CommanderSuggester:
         """Suggest commanders to reach ``count`` total commanders."""
 
         selected_cards = selected or []
-        selected_keys = {
-            self._card_identity_key(card)
-            for card in selected_cards
-        }
+        selected_keys = {self._commander_key(card) for card in selected_cards}
         desired_total = max(count, 0)
         needed = max(desired_total - len(selected_keys), 0)
         if needed <= 0:
             return []
 
+        selected_names = {
+            selected_card.name.strip().casefold()
+            for selected_card in selected_cards
+        }
         pool = [
             card
             for card in self.find_commanders_in_collection(collection)
-            if self._card_identity_key(card) not in selected_keys
-            and card.name.casefold() not in {selected_card.name.casefold() for selected_card in selected_cards}
+            if self._commander_key(card) not in selected_keys
+            and card.name.strip().casefold() not in selected_names
         ]
         if not pool:
             return []
@@ -177,7 +178,7 @@ class CommanderSuggester:
             remaining = [
                 metric
                 for metric in remaining
-                if self._card_identity_key(metric.card) != self._card_identity_key(chosen_metric.card)
+                if self._commander_key(metric.card) != self._commander_key(chosen_metric.card)
             ]
 
         return suggestions
@@ -304,4 +305,8 @@ class CommanderSuggester:
         scryfall_id = card.scryfall_id.strip()
         if scryfall_id:
             return scryfall_id
+        return card.name.strip().casefold()
+
+    @staticmethod
+    def _commander_key(card: Card) -> str:
         return card.name.strip().casefold()

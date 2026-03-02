@@ -12,7 +12,8 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, cast
 
 
 class CardCache:
@@ -23,7 +24,7 @@ class CardCache:
         self._lock = threading.RLock()
         self._closed = False
         self._ensure_parent_dir()
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._enable_wal()
         self._create_tables()
@@ -31,7 +32,12 @@ class CardCache:
     def __enter__(self) -> CardCache:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __del__(self) -> None:
@@ -84,7 +90,7 @@ class CardCache:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row["data_json"])
+        return cast(dict[str, Any], json.loads(row["data_json"]))
 
     def put_card(self, scryfall_id: str, data: dict[str, Any]) -> None:
         """Store raw Scryfall card JSON."""

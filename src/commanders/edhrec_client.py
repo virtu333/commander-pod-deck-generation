@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from pyedhrec import EDHRec
+from pyedhrec import EDHRec  # type: ignore[import-untyped]
 
 from src.utils.cache import CardCache
 

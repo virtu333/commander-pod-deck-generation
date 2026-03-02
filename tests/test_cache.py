@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 from src.utils.cache import CardCache
 
@@ -80,3 +81,25 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
     cache = CardCache(str(tmp_path / "cache.db"))
     cache.close()
     cache.close()
+
+
+def test_cache_accessible_from_another_thread(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "threaded-cache.db"))
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            cache.put_card("card-thread", _sample_card("card-thread", "Arcane Signet"))
+            loaded = cache.get_card("card-thread")
+            assert loaded is not None
+            assert loaded["name"] == "Arcane Signet"
+            cache.put("thread:key", {"ok": True}, ttl_hours=1)
+            assert cache.get("thread:key") == {"ok": True}
+        except BaseException as exc:  # pragma: no cover - assertion proxy for threads
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert errors == []

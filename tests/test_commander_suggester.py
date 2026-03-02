@@ -141,6 +141,47 @@ def test_find_commanders_filters_correctly() -> None:
     assert names == ["Legend A", "Text Commander"]
 
 
+def test_find_commanders_deduplicates_printings() -> None:
+    print_a = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-a")
+    print_b = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-b")
+    other = _card("Tatyova, Benthic Druid", ["U", "G"], scryfall_id="tatyova")
+    collection = _collection([_owned(print_a), _owned(print_b), _owned(other)])
+    suggester = CommanderSuggester(FakeEDHRecClient())
+
+    commanders = suggester.find_commanders_in_collection(collection)
+
+    assert [card.name for card in commanders] == ["Atraxa, Praetors' Voice", "Tatyova, Benthic Druid"]
+
+
+def test_suggest_does_not_duplicate_printings() -> None:
+    print_a = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-a")
+    print_b = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-b")
+    other = _card("Tatyova, Benthic Druid", ["U", "G"], scryfall_id="tatyova")
+    collection = _collection([_owned(print_a), _owned(print_b), _owned(other)])
+    suggester = CommanderSuggester(FakeEDHRecClient())
+
+    suggestions = suggester.suggest(collection, selected=None, count=2, max_edhrec_lookups=0)
+
+    assert len(suggestions) == 2
+    assert [candidate.card.name for candidate in suggestions] == [
+        "Atraxa, Praetors' Voice",
+        "Tatyova, Benthic Druid",
+    ]
+
+
+def test_selected_with_different_printing_still_excluded() -> None:
+    selected_print = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-selected")
+    collection_print = _card("Atraxa, Praetors' Voice", ["W", "U", "B", "G"], scryfall_id="atraxa-collection")
+    other = _card("Tatyova, Benthic Druid", ["U", "G"], scryfall_id="tatyova")
+    collection = _collection([_owned(collection_print), _owned(other)])
+    suggester = CommanderSuggester(FakeEDHRecClient())
+
+    suggestions = suggester.suggest(collection, selected=[selected_print], count=2, max_edhrec_lookups=0)
+
+    assert len(suggestions) == 1
+    assert suggestions[0].card.name == "Tatyova, Benthic Druid"
+
+
 def test_suggest_fills_remaining_slots() -> None:
     a = _card("Commander A", ["W"])
     b = _card("Commander B", ["U"])
