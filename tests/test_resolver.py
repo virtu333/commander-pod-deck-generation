@@ -30,12 +30,21 @@ def _card(card_id: str, name: str, set_code: str = "cmm") -> Card:
 
 class FakeScryfall:
     def __init__(self) -> None:
+        self.cached_cards_by_id: dict[str, Card] = {}
         self.cards_by_id: dict[str, Card] = {}
+        self.cards_by_oracle_name: dict[tuple[str, str | None, str | None], Card] = {}
         self.search_by_query: dict[str, list[Card]] = {}
         self.error_ids: set[str] = set()
+        self.error_oracle_names: set[str] = set()
         self.error_queries: set[str] = set()
+        self.get_card_cached_calls: list[str] = []
         self.get_card_calls: list[str] = []
+        self.get_card_by_name_calls: list[tuple[str, str | None, str | None]] = []
         self.search_queries: list[str] = []
+
+    def get_card_cached(self, scryfall_id: str):
+        self.get_card_cached_calls.append(scryfall_id)
+        return self.cached_cards_by_id.get(scryfall_id)
 
     def get_card(self, scryfall_id: str):
         self.get_card_calls.append(scryfall_id)
@@ -48,6 +57,22 @@ class FakeScryfall:
         if query in self.error_queries:
             raise ScryfallError("boom")
         return self.search_by_query.get(query, [])
+
+    def get_card_by_name(
+        self,
+        name: str,
+        *,
+        set_code: str | None = None,
+        collector_number: str | None = None,
+    ):
+        self.get_card_by_name_calls.append((name, set_code, collector_number))
+        if name in self.error_oracle_names:
+            raise ScryfallError("boom")
+
+        exact = self.cards_by_oracle_name.get((name, set_code, collector_number))
+        if exact is not None:
+            return exact
+        return self.cards_by_oracle_name.get((name, None, None))
 
 
 def test_resolve_entries_with_ids_success() -> None:
@@ -85,6 +110,28 @@ def test_resolve_without_ids_uses_search() -> None:
     assert fake.search_queries == ['!"Fire // Ice"']
 
 
+def test_id_miss_uses_oracle_name_lookup_before_search() -> None:
+    fake = FakeScryfall()
+    fake.cards_by_oracle_name[("Sol Ring", "c21", "263")] = _card(
+        "oracle-sol-ring",
+        "Sol Ring",
+        set_code="c21",
+    )
+    fake.search_by_query['!"Sol Ring"'] = [_card("search-sol-ring", "Sol Ring", set_code="c21")]
+    resolver = CardResolver(fake, console=Console(file=StringIO(), force_terminal=False))
+
+    collection = resolver.resolve(
+        [RawCardEntry("Sol Ring", 1, "stale-id", "c21", "263", False, source_row=2)]
+    )
+
+    assert fake.get_card_cached_calls == ["stale-id"]
+    assert fake.get_card_calls == []
+    assert fake.get_card_by_name_calls == [("Sol Ring", "c21", "263")]
+    assert fake.search_queries == []
+    assert len(collection.cards) == 1
+    assert collection.cards[0].card.scryfall_id == "oracle-sol-ring"
+
+
 def test_id_miss_falls_back_to_exact_name_search() -> None:
     fake = FakeScryfall()
     fake.search_by_query['!"Sol Ring"'] = [_card("fallback-sol-ring", "Sol Ring", set_code="c21")]
@@ -94,7 +141,9 @@ def test_id_miss_falls_back_to_exact_name_search() -> None:
         [RawCardEntry("Sol Ring", 1, "stale-id", "c21", "263", False, source_row=2)]
     )
 
+    assert fake.get_card_cached_calls == ["stale-id"]
     assert fake.get_card_calls == ["stale-id"]
+    assert fake.get_card_by_name_calls == [("Sol Ring", "c21", "263")]
     assert fake.search_queries == ['!"Sol Ring"']
     assert len(collection.cards) == 1
     assert collection.cards[0].card.scryfall_id == "fallback-sol-ring"
@@ -115,7 +164,30 @@ def test_unresolvable_card_is_returned_in_unresolved() -> None:
     assert unresolved.name == "Missing Card"
     assert unresolved.reason == "not_found"
     assert unresolved.source_row == 9
+    assert fake.get_card_cached_calls == ["missing-id"]
+    assert fake.get_card_calls == ["missing-id"]
     assert fake.search_queries == ['!"Missing Card"']
+
+
+def test_cold_id_cache_oracle_hit_skips_live_get_card() -> None:
+    fake = FakeScryfall()
+    fake.cards_by_id["stale-id"] = _card("live-sol-ring", "Sol Ring", set_code="c21")
+    fake.cards_by_oracle_name[("Sol Ring", "c21", "263")] = _card(
+        "oracle-sol-ring",
+        "Sol Ring",
+        set_code="c21",
+    )
+    resolver = CardResolver(fake, console=Console(file=StringIO(), force_terminal=False))
+
+    collection = resolver.resolve(
+        [RawCardEntry("Sol Ring", 1, "stale-id", "c21", "263", False, source_row=2)]
+    )
+
+    assert fake.get_card_cached_calls == ["stale-id"]
+    assert fake.get_card_calls == []
+    assert fake.search_queries == []
+    assert len(collection.cards) == 1
+    assert collection.cards[0].card.scryfall_id == "oracle-sol-ring"
 
 
 def test_api_error_card_is_returned_as_unresolved_api_error() -> None:

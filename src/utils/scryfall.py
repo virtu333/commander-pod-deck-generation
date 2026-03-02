@@ -7,8 +7,10 @@ Caches responses in SQLite.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import requests  # type: ignore[import-untyped]
@@ -42,9 +44,9 @@ class ScryfallClient:
     def get_card(self, scryfall_id: str) -> Card | None:
         """Fetch a card by Scryfall ID, returning None when not found."""
 
-        cached = self.cache.get_card(scryfall_id)
+        cached = self.get_card_cached(scryfall_id)
         if cached is not None:
-            return self._parse_card(cached)
+            return cached
 
         data = self._request(f"{self.BASE_URL}/cards/{scryfall_id}")
         if data is None:
@@ -52,6 +54,59 @@ class ScryfallClient:
 
         self.cache.put_card(scryfall_id, data)
         return self._parse_card(data)
+
+    def get_card_cached(self, scryfall_id: str) -> Card | None:
+        """Return a card by Scryfall ID from local cache only."""
+
+        cached = self.cache.get_card(scryfall_id)
+        if cached is None:
+            return None
+        return self._parse_card(cached)
+
+    def load_bulk_data(self, filepath: str | Path) -> int:
+        """Load Scryfall Oracle bulk JSON from disk into local cache."""
+
+        path = Path(filepath)
+        if not path.exists():
+            raise FileNotFoundError(f"Oracle bulk data file not found: {path}")
+        if not path.is_file():
+            raise ValueError(f"Oracle bulk data path is not a file: {path}")
+
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in Oracle bulk data file: {path}") from exc
+        except OSError as exc:
+            raise ValueError(f"Failed to read Oracle bulk data file: {path}: {exc}") from exc
+
+        if not isinstance(payload, list):
+            raise ValueError("Oracle bulk data JSON must be an array of card objects.")
+
+        return self.cache.replace_oracle_cards(payload)
+
+    def get_card_by_name(
+        self,
+        name: str,
+        *,
+        set_code: str | None = None,
+        collector_number: str | None = None,
+    ) -> Card | None:
+        """Resolve a card by name from locally loaded Oracle bulk data only."""
+
+        candidates = self.cache.get_oracle_cards_by_name(name)
+        candidate = self._best_oracle_candidate(
+            candidates,
+            set_code=set_code,
+            collector_number=collector_number,
+        )
+        if candidate is None:
+            return None
+
+        scryfall_id = str(candidate.get("id", "")).strip()
+        if not scryfall_id:
+            return None
+        return self._parse_card(candidate)
 
     def search(self, query: str) -> list[Card]:
         """Run a Scryfall search query, handling pagination."""
@@ -116,6 +171,58 @@ class ScryfallClient:
         cards = self.search("is:gamechanger")
         self.cache.put(cache_key, [card.scryfall_id for card in cards], ttl_hours=24 * 7)
         return cards
+
+    @staticmethod
+    def _best_oracle_candidate(
+        candidates: list[dict[str, Any]],
+        *,
+        set_code: str | None,
+        collector_number: str | None,
+    ) -> dict[str, Any] | None:
+        if not candidates:
+            return None
+
+        filtered = [
+            card
+            for card in candidates
+            if isinstance(card, dict) and str(card.get("id", "")).strip()
+        ]
+        if not filtered:
+            return None
+
+        if set_code:
+            target_set = set_code.strip().casefold()
+            if target_set:
+                set_matches = [
+                    card
+                    for card in filtered
+                    if str(card.get("set", "")).strip().casefold() == target_set
+                ]
+                if set_matches:
+                    filtered = set_matches
+
+        if collector_number:
+            target_collector = collector_number.strip().casefold()
+            if target_collector:
+                collector_matches = [
+                    card
+                    for card in filtered
+                    if str(card.get("collector_number", "")).strip().casefold()
+                    == target_collector
+                ]
+                if collector_matches:
+                    filtered = collector_matches
+
+        ordered = sorted(filtered, key=ScryfallClient._oracle_candidate_sort_key)
+        return ordered[0] if ordered else None
+
+    @staticmethod
+    def _oracle_candidate_sort_key(card: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(card.get("set", "")).strip().casefold(),
+            str(card.get("collector_number", "")).strip().casefold(),
+            str(card.get("id", "")).strip(),
+        )
 
     def _request(
         self,

@@ -18,7 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class CardResolver:
-    """Resolve collection entries using Scryfall ID first, name search fallback."""
+    """Resolve entries using local cache/Oracle first, then live Scryfall fallback."""
 
     def __init__(self, scryfall: ScryfallClient, console: Console | None = None) -> None:
         self.scryfall = scryfall
@@ -87,10 +87,24 @@ class CardResolver:
 
     def _resolve_entry(self, entry: RawCardEntry) -> Card | None:
         if entry.scryfall_id:
-            # Fallback only when ID lookup is a miss (None). API errors bubble up.
+            card = self.scryfall.get_card_cached(entry.scryfall_id)
+            if card is not None:
+                return card
+
+        card = self.scryfall.get_card_by_name(
+            entry.name,
+            set_code=entry.set_code,
+            collector_number=entry.collector_number,
+        )
+        if card is not None:
+            return card
+
+        if entry.scryfall_id:
+            # Live ID fallback only when local cache and Oracle lookup both miss.
             card = self.scryfall.get_card(entry.scryfall_id)
             if card is not None:
                 return card
+
         return self._resolve_by_name(entry)
 
     def _resolve_by_name(self, entry: RawCardEntry) -> Card | None:

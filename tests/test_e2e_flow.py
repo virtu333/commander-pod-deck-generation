@@ -44,6 +44,34 @@ def _card(
 class _FakeScryfallClient:
     def __init__(self, by_id: dict[str, Card]) -> None:
         self.by_id = by_id
+        self.by_name: dict[str, list[Card]] = {}
+        for card in by_id.values():
+            key = card.name.strip().casefold()
+            self.by_name.setdefault(key, []).append(card)
+
+    def get_card_cached(self, scryfall_id: str) -> Card | None:
+        return self.by_id.get(scryfall_id)
+
+    def get_card_by_name(
+        self,
+        name: str,
+        *,
+        set_code: str | None = None,
+        collector_number: str | None = None,
+    ) -> Card | None:
+        candidates = self.by_name.get(name.strip().casefold(), [])
+        if set_code is not None:
+            set_matches = [card for card in candidates if card.set_code.casefold() == set_code.casefold()]
+            if set_matches:
+                candidates = set_matches
+        if collector_number is not None:
+            target = collector_number.strip().casefold()
+            collector_matches = [
+                card for card in candidates if card.collector_number.strip().casefold() == target
+            ]
+            if collector_matches:
+                candidates = collector_matches
+        return candidates[0] if candidates else None
 
     def get_card(self, scryfall_id: str) -> Card | None:
         return self.by_id.get(scryfall_id)

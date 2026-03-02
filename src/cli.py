@@ -170,6 +170,38 @@ def _print_actionable_error(message: str) -> None:
     console.print(f"[red]Error:[/red] {message}")
 
 
+@app.command(name="load-bulk-data")
+def load_bulk_data(
+    filepath: Path = typer.Argument(..., help="Path to Scryfall Oracle bulk JSON file."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Replace an already loaded Oracle bulk dataset.",
+    ),
+) -> None:
+    """Load Oracle bulk JSON into local cache for offline name resolution."""
+
+    try:
+        with CardCache() as cache:
+            if cache.has_complete_oracle_data() and not force:
+                console.print(
+                    "Oracle bulk dataset is already loaded; skipping "
+                    "(use --force to reload)."
+                )
+                return
+
+            scryfall = ScryfallClient(cache)
+            inserted_count = scryfall.load_bulk_data(filepath)
+    except (FileNotFoundError, ValueError) as exc:
+        _print_actionable_error(str(exc))
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001
+        _print_actionable_error(f"Bulk load failed unexpectedly: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"Loaded Oracle bulk dataset with {inserted_count} rows.")
+
+
 @app.command()
 def build(
     collection: Path = typer.Option(..., help="Path to ManaBox CSV export"),

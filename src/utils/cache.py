@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
@@ -18,6 +19,9 @@ from typing import Any, cast
 
 class CardCache:
     """Simple SQLite-backed cache used across slices."""
+
+    _ORACLE_STATE_SINGLETON = 1
+    _ORACLE_DFC_LAYOUTS = {"transform", "modal_dfc", "double_faced_token"}
 
     def __init__(self, db_path: str = "data/edh_cache.db") -> None:
         self.db_path = db_path
@@ -78,6 +82,48 @@ class CardCache:
                     ttl_hours INTEGER NOT NULL
                 );
                 """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oracle_cards (
+                    scryfall_id TEXT PRIMARY KEY,
+                    name_key TEXT NOT NULL,
+                    front_name_key TEXT,
+                    set_code TEXT NOT NULL,
+                    collector_number TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_oracle_cards_name_key
+                ON oracle_cards(name_key);
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_oracle_cards_front_name_key
+                ON oracle_cards(front_name_key);
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oracle_bulk_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    is_complete INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    loaded_at TEXT NOT NULL
+                );
+                """
+            )
+            self._conn.execute(
+                """
+                INSERT INTO oracle_bulk_state (singleton, is_complete, row_count, loaded_at)
+                VALUES (?, 0, 0, ?)
+                ON CONFLICT(singleton) DO NOTHING;
+                """,
+                (self._ORACLE_STATE_SINGLETON, self._now_iso()),
             )
 
     def get_card(self, scryfall_id: str) -> dict[str, Any] | None:
@@ -166,12 +212,107 @@ class CardCache:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM kv_cache WHERE key = ?", (key,))
 
+    def replace_oracle_cards(self, cards: Iterable[dict[str, Any]]) -> int:
+        """Replace Oracle bulk data atomically, returning inserted row count."""
+
+        inserted_count = 0
+        loaded_at = self._now_iso()
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE oracle_bulk_state
+                    SET is_complete = 0, row_count = 0, loaded_at = ?
+                    WHERE singleton = ?
+                    """,
+                    (loaded_at, self._ORACLE_STATE_SINGLETON),
+                )
+                self._conn.execute("DELETE FROM oracle_cards")
+                for card in cards:
+                    row = self._oracle_row(card)
+                    self._conn.execute(
+                        """
+                        INSERT INTO oracle_cards (
+                            scryfall_id,
+                            name_key,
+                            front_name_key,
+                            set_code,
+                            collector_number,
+                            data_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
+                    inserted_count += 1
+                if inserted_count <= 0:
+                    raise ValueError(
+                        "Oracle bulk data must contain at least one valid card entry."
+                    )
+                self._conn.execute(
+                    """
+                    UPDATE oracle_bulk_state
+                    SET is_complete = 1, row_count = ?, loaded_at = ?
+                    WHERE singleton = ?
+                    """,
+                    (inserted_count, loaded_at, self._ORACLE_STATE_SINGLETON),
+                )
+        except sqlite3.Error as exc:
+            raise ValueError(f"Failed to write Oracle bulk data: {exc}") from exc
+
+        return inserted_count
+
+    def has_complete_oracle_data(self) -> bool:
+        """Return True only when Oracle data is fully loaded and row-count consistent."""
+
+        with self._lock:
+            return self._oracle_dataset_ready_locked()
+
+    def get_oracle_cards_by_name(self, name: str) -> list[dict[str, Any]]:
+        """Return Oracle candidate cards by normalized name or DFC front-face name."""
+
+        normalized = self._normalize_name_key(name)
+        if not normalized:
+            return []
+
+        with self._lock:
+            if not self._oracle_dataset_ready_locked():
+                return []
+            rows = self._conn.execute(
+                """
+                SELECT data_json
+                FROM oracle_cards
+                WHERE name_key = ? OR front_name_key = ?
+                ORDER BY lower(set_code), lower(collector_number), scryfall_id
+                """,
+                (normalized, normalized),
+            ).fetchall()
+
+        cards: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["data_json"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                cards.append(payload)
+        return cards
+
     def clear(self) -> None:
         """Clear all cached values."""
 
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM cards")
             self._conn.execute("DELETE FROM kv_cache")
+            self._conn.execute("DELETE FROM oracle_cards")
+            self._conn.execute(
+                """
+                UPDATE oracle_bulk_state
+                SET is_complete = 0, row_count = 0, loaded_at = ?
+                WHERE singleton = ?
+                """,
+                (self._now_iso(), self._ORACLE_STATE_SINGLETON),
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -191,3 +332,80 @@ class CardCache:
             cached = cached.replace(tzinfo=timezone.utc)
         expires_at = cached + timedelta(hours=ttl_hours)
         return datetime.now(timezone.utc) >= expires_at
+
+    def _oracle_dataset_ready_locked(self) -> bool:
+        state_row = self._conn.execute(
+            """
+            SELECT is_complete, row_count
+            FROM oracle_bulk_state
+            WHERE singleton = ?
+            """,
+            (self._ORACLE_STATE_SINGLETON,),
+        ).fetchone()
+        if state_row is None:
+            return False
+        if int(state_row["is_complete"]) != 1:
+            return False
+        expected_row_count = int(state_row["row_count"])
+        if expected_row_count <= 0:
+            return False
+
+        actual_row = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM oracle_cards"
+        ).fetchone()
+        actual_row_count = int(actual_row["count"]) if actual_row is not None else 0
+        return actual_row_count == expected_row_count
+
+    def _oracle_row(
+        self,
+        card: dict[str, Any],
+    ) -> tuple[str, str, str | None, str, str, str]:
+        if not isinstance(card, dict):
+            raise ValueError("Oracle bulk JSON must contain only object entries.")
+
+        scryfall_id = str(card.get("id", "")).strip()
+        if not scryfall_id:
+            raise ValueError("Oracle card entry is missing required field: id")
+
+        name = str(card.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"Oracle card {scryfall_id} is missing required field: name")
+
+        name_key = self._normalize_name_key(name)
+        if not name_key:
+            raise ValueError(
+                f"Oracle card {scryfall_id} has an empty normalized name key."
+            )
+
+        layout = str(card.get("layout", "")).strip().casefold()
+        front_name_key = self._oracle_front_name_key(card, layout)
+        set_code = str(card.get("set", "")).strip()
+        collector_number = str(card.get("collector_number", "")).strip()
+        payload = json.dumps(card)
+        return (
+            scryfall_id,
+            name_key,
+            front_name_key,
+            set_code,
+            collector_number,
+            payload,
+        )
+
+    @staticmethod
+    def _oracle_front_name_key(card: dict[str, Any], layout: str) -> str | None:
+        if layout not in CardCache._ORACLE_DFC_LAYOUTS:
+            return None
+        card_faces = card.get("card_faces", [])
+        if not isinstance(card_faces, list):
+            return None
+        for face in card_faces:
+            if not isinstance(face, dict):
+                continue
+            name = str(face.get("name", "")).strip()
+            if name:
+                return CardCache._normalize_name_key(name)
+        return None
+
+    @staticmethod
+    def _normalize_name_key(name: str) -> str:
+        return " ".join(name.strip().split()).casefold()

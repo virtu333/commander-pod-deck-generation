@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -276,3 +277,125 @@ def test_get_game_changers_preserves_cached_id_order_during_hydration(
 
     cards = client.get_game_changers()
     assert [card.scryfall_id for card in cards] == ["gc-1", "gc-2", "gc-3"]
+
+
+def test_load_bulk_data_valid_json_enables_oracle_lookup(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(
+        json.dumps(
+            [
+                _card_payload("sol-ring-1", "Sol Ring", set_code="cmm"),
+                {
+                    **_card_payload(
+                        "dfc-1",
+                        "Delver of Secrets // Insectile Aberration",
+                        set_code="isd",
+                    ),
+                    "layout": "transform",
+                    "card_faces": [
+                        {"name": "Delver of Secrets", "oracle_text": "Front text"},
+                        {"name": "Insectile Aberration", "oracle_text": "Back text"},
+                    ],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    inserted = client.load_bulk_data(bulk_file)
+    by_full_name = client.get_card_by_name("Sol Ring")
+    by_front_face = client.get_card_by_name(" delver of secrets ")
+
+    assert inserted == 2
+    assert by_full_name is not None
+    assert by_full_name.scryfall_id == "sol-ring-1"
+    assert by_front_face is not None
+    assert by_front_face.scryfall_id == "dfc-1"
+    assert by_front_face.name == "Delver of Secrets"
+
+
+def test_load_bulk_data_rejects_missing_file(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        client.load_bulk_data(tmp_path / "missing.json")
+
+
+def test_load_bulk_data_rejects_invalid_json(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        client.load_bulk_data(bulk_file)
+
+
+def test_load_bulk_data_rejects_non_array_json(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(json.dumps({"id": "x"}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be an array"):
+        client.load_bulk_data(bulk_file)
+
+
+def test_get_card_by_name_uses_set_then_collector_then_stable_fallback(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text(
+        json.dumps(
+            [
+                {**_card_payload("card-b", "Fire // Ice", set_code="mh2"), "collector_number": "283"},
+                {**_card_payload("card-a", "Fire // Ice", set_code="mh2"), "collector_number": "290"},
+                {**_card_payload("card-c", "Fire // Ice", set_code="2x2"), "collector_number": "290"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.load_bulk_data(bulk_file)
+
+    set_and_collector = client.get_card_by_name(
+        "Fire // Ice",
+        set_code="MH2",
+        collector_number="290",
+    )
+    set_only = client.get_card_by_name(
+        "Fire // Ice",
+        set_code="mh2",
+        collector_number="999",
+    )
+    collector_only = client.get_card_by_name(
+        "Fire // Ice",
+        set_code="unknown",
+        collector_number="290",
+    )
+    stable_fallback = client.get_card_by_name("Fire // Ice")
+
+    assert set_and_collector is not None
+    assert set_and_collector.scryfall_id == "card-a"
+    assert set_only is not None
+    assert set_only.scryfall_id == "card-b"
+    assert collector_only is not None
+    assert collector_only.scryfall_id == "card-c"
+    assert stable_fallback is not None
+    assert stable_fallback.scryfall_id == "card-c"
+
+
+def test_get_card_by_name_treats_corrupt_oracle_row_as_miss(tmp_path: Path) -> None:
+    cache = CardCache(str(tmp_path / "cache.db"))
+    client = ScryfallClient(cache)
+    cache.replace_oracle_cards([_card_payload("sol-ring-1", "Sol Ring")])
+    with cache._conn:  # noqa: SLF001 - direct corruption for recovery test
+        cache._conn.execute(  # noqa: SLF001
+            "UPDATE oracle_cards SET data_json = ? WHERE scryfall_id = ?",
+            ("not-json", "sol-ring-1"),
+        )
+
+    card = client.get_card_by_name("Sol Ring")
+    assert card is None

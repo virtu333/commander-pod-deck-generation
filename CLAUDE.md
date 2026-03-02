@@ -146,23 +146,32 @@ The multi-deck allocator is the core novel piece. Approach:
 
 ## Current Implementation Status
 
-> Update this section as you make progress
+> Last updated: 2026-03-02 — 158 tests passing
 
 - [x] Project scaffolding (pyproject.toml, directory structure)
-- [ ] Scryfall bulk data download + SQLite cache
-- [ ] Collection importer (ManaBox CSV format — use Scryfall IDs for resolution)
-- [ ] Card resolver (match imported names/IDs to Scryfall data)
-- [ ] Commander suggester (EDHREC integration)
-- [ ] Single-deck builder (EDHREC average deck + collection intersection)
-- [ ] Multi-deck allocator (constraint satisfaction for shared cards)
-- [ ] Game Changers detection
-- [ ] Commander Spellbook combo detection
-- [ ] MLD + extra turn detection
-- [ ] Bracket estimator (combining all signals)
-- [ ] Balance tuner (cross-deck bracket equalization — HIGH PRIORITY)
-- [ ] Export formatters (ManaBox CSV, Moxfield/Archidekt text formats)
-- [ ] CLI interface
-- [ ] Tests
+- [x] Scryfall client + SQLite cache (individual lookups, not bulk download)
+- [x] Collection importer (ManaBox CSV + text format)
+- [x] Card resolver (Scryfall ID primary, name-based fallback with set/collector disambiguation)
+- [x] Commander suggester (EDHREC integration — diversity/overlap/buildability scoring)
+- [x] Single-deck builder (EDHREC synergy + avg deck scoring, role targets for ramp/draw/removal)
+- [x] Multi-deck allocator (constraint satisfaction for shared cards, greedy by synergy score)
+- [x] Game Changers detection (Scryfall `is:gamechanger`, cached)
+- [x] Commander Spellbook combo detection (bracket estimation + combo extraction)
+- [x] MLD + extra turn detection (oracle text pattern matching)
+- [x] Bracket estimator (combining GC, MLD, extra turns, Spellbook signals)
+- [ ] Balance tuner (cross-deck bracket equalization — not yet implemented)
+- [x] Export formatters (ManaBox CSV, Moxfield, Archidekt)
+- [x] CLI interface (build, suggest, estimate-bracket commands)
+- [x] Tests (158 tests including E2E integration)
+- [x] E2E flow: import → suggest → build → allocate → estimate → export
+
+### Known Gaps
+- **Balance tuner**: Allocator resolves card conflicts by synergy score but does not
+  post-process to equalize brackets. If one deck lands at Bracket 4 and others at 2,
+  no automatic rebalancing occurs.
+- **Collection resolution speed**: Individual Scryfall API calls (~100ms each). First
+  run on a large collection (2000+ cards) takes 3-5 minutes. Cached after that.
+  Bulk data download would eliminate this.
 
 ## Implementation Order (Recommended)
 

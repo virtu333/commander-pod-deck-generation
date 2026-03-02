@@ -17,6 +17,13 @@ pip install -e ".[dev]"
 ## Usage
 
 ```bash
+# Optional one-time Oracle preload for faster local name resolution
+edh-builder load-bulk-data oracle-cards.json
+# Force replacement when a complete Oracle dataset already exists
+edh-builder load-bulk-data oracle-cards.json --force
+# After preload, first-run resolution prefers local cache + Oracle lookups
+# and only falls back to live Scryfall API calls for misses.
+
 # Build 4 decks from one collection.
 # Provide 1-4 commanders; missing slots are suggested automatically.
 edh-builder build \

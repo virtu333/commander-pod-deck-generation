@@ -14,11 +14,17 @@ runner = CliRunner()
 
 
 class _FakeCache:
+    def __init__(self, complete_oracle: bool = False) -> None:
+        self.complete_oracle = complete_oracle
+
     def __enter__(self) -> _FakeCache:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
         return None
+
+    def has_complete_oracle_data(self) -> bool:
+        return self.complete_oracle
 
 
 def _card(name: str, colors: list[str] | None = None, *, type_line: str = "Creature") -> Card:
@@ -359,3 +365,78 @@ def test_estimate_bracket_accepts_explicit_commander_not_in_decklist_via_scryfal
     )
     assert result.exit_code == 0
     assert "Estimated Bracket: 3" in result.stdout
+
+
+def test_load_bulk_data_command_success(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    loaded_paths: list[Path] = []
+
+    class _FakeScryfallClient:
+        def load_bulk_data(self, filepath: Path) -> int:
+            loaded_paths.append(filepath)
+            return 123
+
+    monkeypatch.setattr(cli, "CardCache", lambda: _FakeCache(complete_oracle=False))
+    monkeypatch.setattr(cli, "ScryfallClient", lambda cache: _FakeScryfallClient())
+
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text("[]", encoding="utf-8")
+    result = runner.invoke(cli.app, ["load-bulk-data", str(bulk_file)])
+
+    assert result.exit_code == 0
+    assert "Loaded Oracle bulk dataset with 123 rows." in result.stdout
+    assert loaded_paths == [bulk_file]
+
+
+def test_load_bulk_data_command_skips_when_complete_without_force(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    class _FailingScryfallClient:
+        def load_bulk_data(self, filepath: Path) -> int:
+            raise AssertionError("load should be skipped when cache is complete")
+
+    monkeypatch.setattr(cli, "CardCache", lambda: _FakeCache(complete_oracle=True))
+    monkeypatch.setattr(cli, "ScryfallClient", lambda cache: _FailingScryfallClient())
+
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text("[]", encoding="utf-8")
+    result = runner.invoke(cli.app, ["load-bulk-data", str(bulk_file)])
+
+    assert result.exit_code == 0
+    assert "already loaded; skipping" in result.stdout
+
+
+def test_load_bulk_data_command_force_reloads_when_complete(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    load_calls: list[Path] = []
+
+    class _FakeScryfallClient:
+        def load_bulk_data(self, filepath: Path) -> int:
+            load_calls.append(filepath)
+            return 7
+
+    monkeypatch.setattr(cli, "CardCache", lambda: _FakeCache(complete_oracle=True))
+    monkeypatch.setattr(cli, "ScryfallClient", lambda cache: _FakeScryfallClient())
+
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text("[]", encoding="utf-8")
+    result = runner.invoke(cli.app, ["load-bulk-data", str(bulk_file), "--force"])
+
+    assert result.exit_code == 0
+    assert "Loaded Oracle bulk dataset with 7 rows." in result.stdout
+    assert load_calls == [bulk_file]
+
+
+def test_load_bulk_data_command_returns_nonzero_on_validation_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # noqa: ANN001
+    class _FailingScryfallClient:
+        def load_bulk_data(self, filepath: Path) -> int:
+            raise ValueError("Invalid JSON in Oracle bulk data file")
+
+    monkeypatch.setattr(cli, "CardCache", lambda: _FakeCache(complete_oracle=False))
+    monkeypatch.setattr(cli, "ScryfallClient", lambda cache: _FailingScryfallClient())
+
+    bulk_file = tmp_path / "oracle.json"
+    bulk_file.write_text("{}", encoding="utf-8")
+    result = runner.invoke(cli.app, ["load-bulk-data", str(bulk_file)])
+
+    assert result.exit_code != 0
+    assert "Invalid JSON in Oracle bulk data file" in result.stdout
