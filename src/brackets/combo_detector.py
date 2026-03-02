@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from src.collection.models import ComboInfo
 from src.utils.cache import CardCache
@@ -164,14 +164,16 @@ class ComboDetector:
         if not isinstance(raw_item, dict):
             return None
 
-        variant = raw_item.get("variant") if isinstance(raw_item.get("variant"), dict) else {}
-        combo_obj = (
-            variant.get("combo")
-            if isinstance(variant.get("combo"), dict)
-            else raw_item.get("combo")
-            if isinstance(raw_item.get("combo"), dict)
-            else {}
-        )
+        raw_variant = raw_item.get("variant")
+        variant: dict[str, Any] = raw_variant if isinstance(raw_variant, dict) else {}
+        raw_variant_combo = variant.get("combo")
+        raw_combo = raw_item.get("combo")
+        if isinstance(raw_variant_combo, dict):
+            combo_obj: dict[str, Any] = raw_variant_combo
+        elif isinstance(raw_combo, dict):
+            combo_obj = raw_combo
+        else:
+            combo_obj = {}
 
         tag = (
             self._normalize_tag(raw_item.get("bracketTag"))

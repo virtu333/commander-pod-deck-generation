@@ -114,7 +114,7 @@ class ComboInfo:
 class BracketEstimate:
     """Bracket estimation result for a single deck.
 
-    `bracket` is the practical allocation floor in the range 2-5.
+    `bracket` is the estimated deck bracket in the range 1-5.
     """
 
     bracket: int

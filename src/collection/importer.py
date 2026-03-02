@@ -6,6 +6,7 @@ import csv
 import logging
 import re
 from pathlib import Path
+from collections.abc import Sequence
 
 from src.collection.models import RawCardEntry
 
@@ -113,7 +114,7 @@ def import_text(filepath: Path) -> list[RawCardEntry]:
     return list(aggregated.values())
 
 
-def _build_column_lookup(fieldnames: list[str]) -> dict[str, str]:
+def _build_column_lookup(fieldnames: Sequence[str]) -> dict[str, str]:
     lookup: dict[str, str] = {}
     for original_name in fieldnames:
         normalized = _normalize_header(original_name)

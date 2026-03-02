@@ -17,14 +17,20 @@ pip install -e ".[dev]"
 ## Usage
 
 ```bash
-# Build 4 decks, providing 1-4 commanders (tool suggests the rest)
-edh-builder build --collection my_cards.csv --commanders "Commander A" "Commander B"
+# Build 4 decks from one collection.
+# Provide 1-4 commanders; missing slots are suggested automatically.
+edh-builder build \
+  --collection my_cards.csv \
+  --commanders "Commander A" \
+  --output-dir out/decks \
+  --format moxfield --format archidekt --format manabox
 
-# Get commander suggestions based on your collection
-edh-builder suggest --collection my_cards.csv
+# Get commander suggestions (optionally complement existing picks)
+edh-builder suggest --collection my_cards.csv --selected "Commander A"
 
 # Estimate bracket for an existing decklist
-edh-builder estimate-bracket --decklist my_deck.txt
+# (pass commander explicitly when auto-detection is ambiguous)
+edh-builder estimate-bracket --decklist my_deck.txt --commander "Commander A"
 ```
 
 ## Exporting from ManaBox

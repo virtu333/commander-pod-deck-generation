@@ -1,8 +1,7 @@
 """Bracket estimation engine.
 
 This estimator combines objective local signals and Spellbook output to produce a
-floor estimate. The final estimated bracket is clamped to a minimum of Bracket 2.
-Spellbook tag E is still surfaced via `spellbook_bracket_tag`.
+floor estimate in the range 1-5.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from src.collection.models import BracketEstimate, Card, ComboInfo
 class BracketEstimator:
     """Combine local rules and Spellbook data into a bracket floor estimate.
 
-    Final output is clamped to Bracket 2+ for practical gameplay allocation.
+    The output bracket always stays within the 1-5 Commander bracket contract.
     """
 
     def __init__(
@@ -32,7 +31,7 @@ class BracketEstimator:
     def estimate(self, cards: list[Card], commanders: list[Card]) -> BracketEstimate:
         pool_cards = self._combined_pool(cards, commanders)
         reasons: list[str] = []
-        bracket = 2
+        bracket = 1
 
         game_changers, gc_success = self.game_changers.detect(pool_cards)
         game_changer_names = self._unique_names(game_changers)
@@ -72,17 +71,10 @@ class BracketEstimator:
         if spellbook_result is not None:
             combos = spellbook_result.combos
             spellbook_tag = spellbook_result.bracket_tag
-            if spellbook_result.bracket < 2:
-                reasons.append(
-                    "Spellbook bracket tag "
-                    f"{spellbook_tag} maps to bracket {spellbook_result.bracket}; "
-                    "estimator floor clamps to bracket 2"
-                )
-            else:
-                reasons.append(
-                    "Spellbook bracket tag "
-                    f"{spellbook_tag} suggests bracket {spellbook_result.bracket}"
-                )
+            reasons.append(
+                "Spellbook bracket tag "
+                f"{spellbook_tag} suggests bracket {spellbook_result.bracket}"
+            )
             bracket = max(bracket, spellbook_result.bracket)
 
             two_card_brackets = [

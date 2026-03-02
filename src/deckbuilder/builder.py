@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 from src.collection.models import Card, Collection
 from src.commanders.edhrec_client import CommanderProfile, EDHRecClient
@@ -18,6 +19,17 @@ _COLOR_TO_BASIC: dict[str, str] = {
 }
 _BASIC_LAND_NAMES: frozenset[str] = frozenset({*_COLOR_TO_BASIC.values(), "Wastes"})
 _WUBRG_ORDER: tuple[str, ...] = ("W", "U", "B", "R", "G")
+_REMOVAL_TEXT_HINTS: tuple[str, ...] = (
+    "destroy target",
+    "exile target",
+    "counter target",
+    "target creature gets",
+    "deals",
+    "fight target",
+    "each opponent sacrifices",
+    "return target",
+    "sweep",
+)
 
 
 @dataclass(slots=True)
@@ -53,6 +65,35 @@ def _is_basic_land(card: Card) -> bool:
 
 def _is_land(card: Card) -> bool:
     return "land" in card.type_line.casefold()
+
+
+def _oracle_text(card: Card) -> str:
+    return card.oracle_text.casefold()
+
+
+def _is_ramp_card(card: Card) -> bool:
+    text = _oracle_text(card)
+    name = card.name.casefold()
+    if "add {" in text or "treasure token" in text:
+        return True
+    if "search your library for" in text and "land" in text:
+        return True
+    return "signet" in name or "talisman" in name
+
+
+def _is_draw_card(card: Card) -> bool:
+    text = _oracle_text(card)
+    return (
+        "draw a card" in text
+        or "draw two cards" in text
+        or "draw three cards" in text
+        or "whenever you draw" in text
+    )
+
+
+def _is_removal_card(card: Card) -> bool:
+    text = _oracle_text(card)
+    return any(hint in text for hint in _REMOVAL_TEXT_HINTS)
 
 
 def _make_basic_land(name: str) -> Card:
@@ -158,13 +199,40 @@ class DeckBuilder:
 
         target_lands = min(max(self.template.target_lands, 0), 99)
         nonland_target = 99 - target_lands
+        selected_nonlands: list[Card] = []
+        selected_nonland_keys: set[str] = set()
+        role_plan: tuple[tuple[int, Callable[[Card], bool]], ...] = (
+            (max(self.template.target_ramp, 0), _is_ramp_card),
+            (max(self.template.target_draw, 0), _is_draw_card),
+            (max(self.template.target_removal, 0), _is_removal_card),
+        )
+        for role_target, role_matcher in role_plan:
+            slots_remaining = nonland_target - len(selected_nonlands)
+            if slots_remaining <= 0:
+                break
+            selected_nonlands.extend(
+                self._pick_role_cards(
+                    ranked=ranked_nonlands,
+                    already_selected=selected_nonland_keys,
+                    limit=min(role_target, slots_remaining),
+                    role_matcher=role_matcher,
+                )
+            )
 
-        selected_nonlands = [card for card, _ in ranked_nonlands[:nonland_target]]
+        selected_nonlands.extend(
+            self._pick_best_cards(
+                ranked=ranked_nonlands,
+                already_selected=selected_nonland_keys,
+                limit=max(nonland_target - len(selected_nonlands), 0),
+            )
+        )
+
         land_slots = 99 - len(selected_nonlands)
-
-        selected_nonbasic_lands = [
-            card for card, _ in ranked_nonbasic_lands[:land_slots]
-        ]
+        selected_nonbasic_lands = self._pick_best_cards(
+            ranked=ranked_nonbasic_lands,
+            already_selected=set(),
+            limit=land_slots,
+        )
         remaining_basics = land_slots - len(selected_nonbasic_lands)
 
         basics, basics_added = self._generate_basics(
@@ -175,9 +243,12 @@ class DeckBuilder:
         cards = selected_nonlands + selected_nonbasic_lands + basics
 
         scores: dict[str, float] = {}
-        for card in cards:
+        for card in candidates:
             key = card.name.strip().casefold()
             scores[key] = scoring.scores.get(key, 0.0)
+        for card in cards:
+            key = card.name.strip().casefold()
+            scores.setdefault(key, scoring.scores.get(key, 0.0))
 
         return BuiltDeck(
             commander=commander,
@@ -251,6 +322,49 @@ class DeckBuilder:
         ]
         ranked.sort(key=lambda item: (-item[1], item[0].name.casefold()))
         return ranked
+
+    @staticmethod
+    def _pick_role_cards(
+        ranked: list[tuple[Card, float]],
+        already_selected: set[str],
+        limit: int,
+        role_matcher: Callable[[Card], bool],
+    ) -> list[Card]:
+        if limit <= 0:
+            return []
+
+        selected: list[Card] = []
+        for card, _ in ranked:
+            if len(selected) >= limit:
+                break
+            key = card.name.strip().casefold()
+            if key in already_selected:
+                continue
+            if not role_matcher(card):
+                continue
+            already_selected.add(key)
+            selected.append(card)
+        return selected
+
+    @staticmethod
+    def _pick_best_cards(
+        ranked: list[tuple[Card, float]],
+        already_selected: set[str],
+        limit: int,
+    ) -> list[Card]:
+        if limit <= 0:
+            return []
+
+        selected: list[Card] = []
+        for card, _ in ranked:
+            if len(selected) >= limit:
+                break
+            key = card.name.strip().casefold()
+            if key in already_selected:
+                continue
+            already_selected.add(key)
+            selected.append(card)
+        return selected
 
     @staticmethod
     def _generate_basics(

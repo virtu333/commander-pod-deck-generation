@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Any
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from src.collection.models import Card
 from src.utils.cache import CardCache

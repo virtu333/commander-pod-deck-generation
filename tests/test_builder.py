@@ -36,6 +36,7 @@ def _card(
     *,
     type_line: str = "Creature",
     scryfall_id: str | None = None,
+    oracle_text: str = "",
 ) -> Card:
     return Card(
         scryfall_id=scryfall_id or name.casefold().replace(" ", "-"),
@@ -44,7 +45,7 @@ def _card(
         cmc=0.0,
         color_identity=colors or [],
         type_line=type_line,
-        oracle_text="",
+        oracle_text=oracle_text,
         keywords=[],
         legalities={"commander": "legal"},
         set_code="tst",
@@ -317,3 +318,88 @@ def test_nonbasic_lands_scored_by_edhrec() -> None:
 
     assert "Boseiju, Who Endures" in names
     assert "Tranquil Thicket" not in names
+
+
+def test_builder_scores_include_unselected_legal_candidates() -> None:
+    commander = _card("Mono White", ["W"], type_line="Legendary Creature")
+    top_pick = _card("Top Pick", ["W"], type_line="Instant")
+    bench_card = _card("Bench Card", ["W"], type_line="Instant")
+    fake = FakeEDHRecClient(
+        profiles={
+            "mono white": _profile(
+                "Mono White",
+                [
+                    ("Top Pick", 1.0, 1.0),
+                    ("Bench Card", 0.5, 0.5),
+                ],
+            )
+        },
+        avg_decks={"mono white": None},
+    )
+    collection = _collection([_owned(top_pick), _owned(bench_card)])
+    builder = DeckBuilder(edhrec=fake, template=DeckTemplate(target_lands=98))
+
+    built = builder.build(commander, collection)
+    assert "top pick" in built.scores
+    assert "bench card" in built.scores
+    assert all(card.name != "Bench Card" for card in built.cards)
+    assert built.scores["bench card"] > 0.0
+
+
+def test_template_role_targets_are_consumed_as_priorities() -> None:
+    commander = _card("Mono Blue", ["U"], type_line="Legendary Creature")
+    ramp_card = _card("Mind Stone", ["U"], type_line="Artifact", oracle_text="{T}: Add {C}.")
+    draw_card = _card("Divination", ["U"], type_line="Sorcery", oracle_text="Draw two cards.")
+    removal_card = _card(
+        "Pongify",
+        ["U"],
+        type_line="Instant",
+        oracle_text="Destroy target creature.",
+    )
+    filler_a = _card("Filler A", ["U"], type_line="Sorcery")
+    filler_b = _card("Filler B", ["U"], type_line="Sorcery")
+
+    fake = FakeEDHRecClient(
+        profiles={
+            "mono blue": _profile(
+                "Mono Blue",
+                [
+                    ("Filler A", 1.0, 1.0),
+                    ("Filler B", 0.9, 0.9),
+                ],
+            )
+        },
+        avg_decks={"mono blue": None},
+    )
+    collection = _collection(
+        [
+            _owned(ramp_card),
+            _owned(draw_card),
+            _owned(removal_card),
+            _owned(filler_a),
+            _owned(filler_b),
+        ]
+    )
+    builder = DeckBuilder(
+        edhrec=fake,
+        template=DeckTemplate(
+            target_lands=95,
+            target_ramp=1,
+            target_draw=1,
+            target_removal=1,
+        ),
+    )
+
+    built = builder.build(commander, collection)
+    names = {card.name for card in built.cards}
+    assert "Mind Stone" in names
+    assert "Divination" in names
+    assert "Pongify" in names
+
+
+def test_template_defaults_include_role_targets() -> None:
+    template = DeckTemplate()
+    assert template.target_lands == 37
+    assert template.target_ramp == 10
+    assert template.target_draw == 10
+    assert template.target_removal == 5

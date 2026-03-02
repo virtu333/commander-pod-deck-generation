@@ -173,14 +173,14 @@ def test_ruthless_spellbook_tag_pushes_bracket_4() -> None:
     assert result.spellbook_bracket_tag == "R"
 
 
-def test_spellbook_e_tag_is_clamped_to_bracket_2_with_reason() -> None:
+def test_spellbook_e_tag_returns_bracket_1_with_reason() -> None:
     estimator, _, _ = _estimator(spellbook=_spellbook_result(tag="E", bracket=1))
 
     result = estimator.estimate(cards=[_card("Cultivate")], commanders=[_card("Omnath")])
-    assert result.bracket == 2
+    assert result.bracket == 1
     assert result.confidence == "high"
     assert result.spellbook_bracket_tag == "E"
-    assert any("clamps to bracket 2" in reason.lower() for reason in result.reasons)
+    assert any("suggests bracket 1" in reason.lower() for reason in result.reasons)
 
 
 def test_two_card_combo_pushes_bracket_3() -> None:
@@ -208,7 +208,7 @@ def test_spellbook_down_and_no_local_signals_is_low_confidence() -> None:
     estimator, _, _ = _estimator(spellbook=None)
 
     result = estimator.estimate(cards=[_card("Cultivate")], commanders=[_card("Omnath")])
-    assert result.bracket == 2
+    assert result.bracket == 1
     assert result.confidence == "low"
 
 
